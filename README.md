@@ -54,5 +54,5 @@ ln -sf /etc/ugreen-leds-day.conf /etc/ugreen-leds.conf
 ├── configs/              # Master configuration profiles
 │   ├── ugreen-leds-day.conf
 │   └── ugreen-leds-night.conf
-└── system_configs/       # Backups of systemd units and modules
+└── led_controller/       # Backups of the led_controller installer
 ```
