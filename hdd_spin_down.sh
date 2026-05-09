@@ -26,7 +26,7 @@ for group in "${DISK_GROUPS[@]}"; do
 done
 
 # UGREEN Fan Node (confirmed as hwmon10/it8620)
-FAN_NODE="/sys/class/hwmon/hwmon10"
+FAN_NODE=$(for i in /sys/class/hwmon/hwmon*; do if [ "$(cat $i/name 2>/dev/null)" = "it8620" ]; then echo $i; break; fi; done)
 
 set_dynamic_fans() {
     # Read the highest CPU core temperature
