@@ -15,4 +15,7 @@ ln -sf /mnt/fastpool-sys/scripts/configs/ugreen-leds-night.conf /etc/ugreen-leds
 # They will read the night config and safely command the hardware to go dark
 systemctl start ugreen-power-led.service ugreen-netdevmon-multi.service ugreen-diskiomon.service
 
+# I'd rather the lights service fails silently then give me a heart attack red light because systemd was overly attached to it's service
+
+
 exit 0
