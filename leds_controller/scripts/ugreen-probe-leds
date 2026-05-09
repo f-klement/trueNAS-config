@@ -1,0 +1,40 @@
+#!/usr/bin/bash
+
+set -e
+
+# Load i2c-dev module
+{ lsmod | grep i2c_dev ; } || modprobe -v i2c-dev
+
+# Load led-ugreen module
+if ! lsmod | grep -q led_ugreen; then
+    if modprobe -v led-ugreen 2>/dev/null; then
+        echo "led-ugreen module loaded successfully"
+    else
+        # Fallback: load module directly from persistent path (TrueNAS: dkms not available)
+        KO_PATH="/mnt/fastpool-sys/scripts/leds_controller/led-ugreen.ko"
+        if [ -f "$KO_PATH" ]; then
+            echo "Module led-ugreen not found for kernel $(uname -r), loading from persistent path..."
+            insmod "$KO_PATH" || { echo "ERROR: insmod failed for $KO_PATH"; exit 1; }
+            echo "Module loaded successfully via insmod"
+        else
+            echo "ERROR: led-ugreen.ko not found at $KO_PATH"
+            echo "Please reinstall using install_ugreen_leds_controller.sh"
+            exit 1
+        fi
+    fi
+fi
+
+i2c_dev=$(i2cdetect -l | grep "SMBus I801 adapter" | grep -Po "i2c-\d+")
+
+if [ $? = 0 ]; then 
+        echo "Found I2C device /dev/${i2c_dev}"
+        dev_path=/sys/bus/i2c/devices/$i2c_dev/${i2c_dev/i2c-/}-003a
+        if [ ! -d $dev_path ]; then
+            echo "led-ugreen 0x3a" > /sys/bus/i2c/devices/${i2c_dev}/new_device
+        elif [ "$(cat $dev_path/name)" != "led-ugreen" ]; then
+            echo "ERROR: the device ${i2c_dev/i2c-/}-003a has been registered as $(cat $dev_path/name)"
+            exit 1
+        fi
+else
+        echo "I2C device not found!"
+fi

@@ -1,0 +1,13 @@
+# Ignore temporary script logs and IO states
+*.log
+tmp/
+*_io
+
+# Ignore sensitive K3s data if you plan to backup manifests here
+*.token
+*.kubeconfig
+secrets.yaml
+
+# Ignore TrueNAS system artifacts
+.DS_Store
+.zfs/
