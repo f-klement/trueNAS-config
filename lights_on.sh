@@ -14,4 +14,6 @@ ln -sf /mnt/fastpool-sys/scripts/configs/ugreen-leds-day.conf /etc/ugreen-leds.c
 # 4. Start the daemons with a perfectly clean slate
 systemctl start ugreen-power-led.service ugreen-netdevmon-multi.service ugreen-diskiomon.service
 
+# I'd rather the lights service fails silently then give me a heart attack red light because systemd was overly attached to it's service
+
 exit 0
