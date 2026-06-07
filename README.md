@@ -19,11 +19,27 @@ Controlled via a custom kernel module (led-ugreen.ko). The cluster switches betw
 
 ## Core Automation
 ### hdd_spin_down.sh
-A reactive management script that monitors /sys/block/sdX/stat for IO increments.
+Parks idle HDD groups by watching `/sys/block/sdX/stat` for IO increments. A group is
+spun down (`hdparm -y`) only when every present, spinning disk in it has been idle longer
+than the threshold; disks already in standby don't block the group.
 
-Threshold: Configurable (defaulting to 7200s for a 2-hour spin-down).
+Threshold: Configurable (defaulting to 7200s for a 2-hour spin-down) — `./hdd_spin_down.sh [idle_seconds] ["grpA disks;grpB disks"]`.
 
-Reactive Logic: If all drives are in standby, it commands the IT8620E to drop fans to a silent "whisper" floor (PWM 40-45). If IO is detected, it restores the factory "Auto" fan curve to ensure thermal safety.
+Robustness: idle time is tracked by a timestamp stored inside the per-disk state file
+(`tmp/<disk>.io`), not the file's mtime; non-rotational devices (SSD/NVMe) are never spun
+down; unreadable disks/power states are skipped rather than parked; output goes to the log
+file only (no cron email spam).
+
+> Fan control is **not** done here — `fan_control.sh` owns the fans and reacts to CPU+disk
+> temps every minute, independent of spin-down. (The old combined version also called
+> undefined `apply_blackout_fans`/`set_fans_silent` functions.)
+
+### fan_control.sh
+Proportional fan control reacting to the hottest of CPU (`coretemp`/`k10temp`) and disk
+(`drivetemp` hwmon, `smartctl` fallback) temperatures. Sensors are discovered by name
+(hwmon indices aren't stable across reboots). Separate CPU/disk curves, a panic temperature
+that hands control back to the BIOS, and a fail-safe to BIOS auto if no sensor is readable.
+Run every minute from cron (`fan_control.sh`) or as a fast loop daemon (`fan_control.sh 20`).
 
 ### lights_on.sh / lights_out.sh
 Handles the atomic switching of the LED daemon profiles.
@@ -48,7 +64,7 @@ ln -sf /etc/ugreen-leds-day.conf /etc/ugreen-leds.conf
 
 ```Plaintext
 .
-├── hdd_spin_down.sh      # Reactive IO monitoring & Fan control
+├── hdd_spin_down.sh      # Reactive IO monitoring -> HDD spin-down (no fan logic)
 ├── lights_on.sh          # Manual/Automated switch to Day Mode
 ├── lights_out.sh         # Manual/Automated switch to Night Mode
 ├── fan_control.sh        # Reactive load based Fan control
