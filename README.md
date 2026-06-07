@@ -51,6 +51,7 @@ ln -sf /etc/ugreen-leds-day.conf /etc/ugreen-leds.conf
 ├── hdd_spin_down.sh      # Reactive IO monitoring & Fan control
 ├── lights_on.sh          # Manual/Automated switch to Day Mode
 ├── lights_out.sh         # Manual/Automated switch to Night Mode
+├── fan_control.sh        # Reactive load based Fan control
 ├── configs/              # Master configuration profiles
 │   ├── ugreen-leds-day.conf
 │   └── ugreen-leds-night.conf
