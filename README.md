@@ -73,3 +73,37 @@ ln -sf /etc/ugreen-leds-day.conf /etc/ugreen-leds.conf
 │   └── ugreen-leds-night.conf
 └── led_controller/       # Backups of the led_controller installer
 ```
+
+## Operating
+
+### Reading the logs
+Both scripts log to files under `/root/scripts/tmp/` (they print to the terminal only when
+run interactively, so cron stays silent — that's why a cron run shows nothing on the CLI):
+
+```bash
+# follow live
+tail -f /root/scripts/tmp/fan-control.log
+tail -f /root/scripts/tmp/hdd_spin_down.log
+
+# last N lines
+tail -n 50 /root/scripts/tmp/hdd_spin_down.log
+
+# run by hand to watch the decision live (prints to the terminal AND the log)
+/root/scripts/hdd_spin_down.sh 7200 "sda sdc sdd;sdb;sde"
+/root/scripts/fan_control.sh          # one cycle
+```
+A fan-control line reads: `cpu=46C(0%) disk=41C(0%) demand=0% -> pwm1/2=25 pwm3=0 (floor=25)`.
+The logs self-trim to the last few thousand lines.
+
+### Finding the quietest stable fan floor (PWM_FLOOR)
+Lower `PWM_FLOOR` in `fan_control.sh` = quieter idle, but too low and a fan stalls (0 RPM)
+and may not restart. Find the lowest value that still spins, then set `PWM_FLOOR` a notch
+above it:
+
+```bash
+FAN=$(for i in /sys/class/hwmon/hwmon*; do [ "$(cat $i/name 2>/dev/null)" = it8620 ] && echo $i; done)
+echo 1 > "$FAN/pwm1_enable"; echo 1 > "$FAN/pwm2_enable"
+for p in 0 12 16 20 25 30 40; do echo $p > "$FAN/pwm1"; echo $p > "$FAN/pwm2"; sleep 6; \
+  echo "PWM=$p -> fan1=$(cat $FAN/fan1_input 2>/dev/null) fan2=$(cat $FAN/fan2_input 2>/dev/null) RPM"; done
+# restore automatic control to fan_control.sh afterwards (next cron cycle takes over)
+```

@@ -27,10 +27,13 @@ LOGFILE="$TMPDIR/$(basename "$0" .sh).log"
 HDPARM="$(command -v hdparm || echo /usr/sbin/hdparm)"
 mkdir -p "$TMPDIR"
 
-log(){ echo "[$(date '+%F %T')] $*" >>"$LOGFILE"; }
+log(){ local m="[$(date '+%F %T')] $*"; echo "$m" >>"$LOGFILE"; [ -t 1 ] && echo "$m"; return 0; }
 
 IFS=';' read -ra DISK_GROUPS <<< "$DISK_GROUPS_STR"
 now=$(date +%s)
+
+# Keep the log bounded.
+n=0; [ -f "$LOGFILE" ] && n=$(wc -l <"$LOGFILE"); [ "$n" -gt 10000 ] && { tail -n 4000 "$LOGFILE" > "$LOGFILE.tmp" && mv "$LOGFILE.tmp" "$LOGFILE"; }
 
 log "===== spindown run (threshold ${THRESHOLD}s) ====="
 [ -x "$HDPARM" ] || { log "FATAL: hdparm not found at '$HDPARM'"; exit 1; }

@@ -25,18 +25,23 @@
 set -uo pipefail
 
 # ── Tunables (temperatures in millidegrees C) ─────────────────────────────────
-# CPUs tolerate more heat than spinning disks, so they get separate curves.
-CPU_MIN=45000;  CPU_MAX=70000;  CPU_PANIC=85000
-DISK_MIN=38000; DISK_MAX=52000; DISK_PANIC=60000
+# Curves stay at the whisper floor until *_MIN, ramp linearly to full by *_MAX, and
+# hand control to the BIOS at *_PANIC. MINs are set high so the fans stay quiet at
+# idle/light load and only spin up as temps approach the 50-60°C zone; MAXs keep
+# them reaching full before the warning band. CPUs tolerate more heat than disks.
+CPU_MIN=55000;  CPU_MAX=75000;  CPU_PANIC=85000
+DISK_MIN=45000; DISK_MAX=55000; DISK_PANIC=60000
 
 # Main case/CPU fans (pwm1, pwm2): 0-255.
-PWM_FLOOR=40;   PWM_CEIL=255
-# Third channel (pwm3) idles off in the old config; keep that behaviour.
+# PWM_FLOOR = "whisper" idle speed. Lower = quieter; if a fan stalls and won't
+# restart, raise it. Find the lowest stable value for your fans with the test
+# snippet in the README. pwm3 stays fully OFF until there's load.
+PWM_FLOOR=25;   PWM_CEIL=255
 PWM3_FLOOR=0;   PWM3_CEIL=200
 
-# Quiet hours: only lowers the IDLE floor; the load curve still ramps to full, so
-# thermal safety is never sacrificed for silence. Set QUIET_FLOOR<0 to disable.
-QUIET_START=23; QUIET_END=6; QUIET_FLOOR=25
+# Quiet hours: only lowers the IDLE floor further; the load curve still ramps to
+# full, so thermal safety is never sacrificed for silence. Set QUIET_FLOOR<0 to disable.
+QUIET_START=23; QUIET_END=6; QUIET_FLOOR=18
 
 DISKS="sda sdb sdc sdd sde"        # data disks to poll for temperature
 
@@ -45,7 +50,10 @@ LOGFILE="$TMPDIR/fan-control.log"
 INTERVAL="${1:-0}"                  # 0 = run once; >0 = loop every N seconds
 
 mkdir -p "$TMPDIR"
-log(){ echo "[$(date '+%F %T')] $*" >>"$LOGFILE"; }
+# Always append to the log; also echo to the terminal when run interactively (so a
+# manual run shows output, but cron stays silent — no per-minute emails).
+log(){ local m="[$(date '+%F %T')] $*"; echo "$m" >>"$LOGFILE"; [ -t 1 ] && echo "$m"; return 0; }
+trim_log(){ [ -f "$LOGFILE" ] || return; local n; n=$(wc -l <"$LOGFILE"); [ "$n" -gt 10000 ] && { tail -n 4000 "$LOGFILE" > "$LOGFILE.tmp" && mv "$LOGFILE.tmp" "$LOGFILE"; }; }
 
 # ── Sensor discovery (by name, not index) ─────────────────────────────────────
 hwmon_by_name(){ local d; for d in /sys/class/hwmon/hwmon*; do
@@ -94,6 +102,7 @@ apply_pwm(){ local p12=$1 p3=$2 ch
 restore_auto(){ local ch; for ch in 1 2 3; do echo 2 >"$FAN_NODE/pwm${ch}_enable" 2>/dev/null; done; }
 
 control_once(){
+    trim_log
     [ -n "$FAN_NODE" ] || { log "FATAL: it8620 fan node not found — not touching fans"; return 1; }
 
     local cpu disk floor cpu_d disk_d d p12 p3 hour
