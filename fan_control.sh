@@ -26,11 +26,14 @@ set -uo pipefail
 
 # ── Tunables (temperatures in millidegrees C) ─────────────────────────────────
 # Curves stay at the whisper floor until *_MIN, ramp linearly to full by *_MAX, and
-# hand control to the BIOS at *_PANIC. MINs are set high so the fans stay quiet at
-# idle/light load and only spin up as temps approach the 50-60°C zone; MAXs keep
-# them reaching full before the warning band. CPUs tolerate more heat than disks.
-CPU_MIN=55000;  CPU_MAX=75000;  CPU_PANIC=85000
-DISK_MIN=45000; DISK_MAX=55000; DISK_PANIC=60000
+# hand control to the BIOS at *_PANIC. MINs sit ABOVE the normal operating range so the
+# fans stay silent through everyday temps and only spin up as the hardware approaches its
+# real warning band. HDDs run happily to ~50°C and are only a concern near 60°C, so the
+# disk ramp starts at 50°C (was 45°C, which made the fans audible at perfectly normal
+# temps and held them there because drives shed heat slowly). CPUs tolerate more heat.
+# Tune DISK_MIN to ~2°C above your drives' real ceiling — check the log for actual temps.
+CPU_MIN=60000;  CPU_MAX=80000;  CPU_PANIC=85000
+DISK_MIN=50000; DISK_MAX=58000; DISK_PANIC=62000
 
 # Main case/CPU fans (pwm1, pwm2): 0-255.
 # PWM_FLOOR = "whisper" idle speed. Lower = quieter; if a fan stalls and won't
