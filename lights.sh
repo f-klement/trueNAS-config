@@ -40,7 +40,13 @@ log "switching LEDs to $MODE ($PROFILE)"
 
 # ── Commit point (from here we FAIL SOFT — log, don't escalate) ────────────────
 # Stop is synchronous; then clear the daemons' buggy lock/PID files for a clean slate.
-systemctl stop $STOP_SERVICES 2>/dev/null || true
+# Every systemctl call is wrapped in `timeout`: these daemons have been seen to ignore
+# SIGTERM, which makes systemd wait out TimeoutStopSec (90s default). An unbounded stop
+# is what let the TrueNAS cron task overrun and get SIGKILLed (the exit-137 you saw), so
+# we cap each call and fail soft on a hang (124 = timed out) rather than block forever.
+sc(){ timeout 30 systemctl "$@"; local rc=$?; [ "$rc" -eq 124 ] && log "WARN: 'systemctl $*' timed out after 30s"; return $rc; }
+
+sc stop $STOP_SERVICES 2>/dev/null || true
 rm -f /var/run/ugreen-* /run/ugreen-* 2>/dev/null || true
 
 # Point the live config at the chosen profile and confirm it resolved.
@@ -52,7 +58,7 @@ fi
 
 # Start the daemons; report any that don't come up, but never hard-fail.
 rc=0
-systemctl start $START_SERVICES 2>>"$LOG" || rc=$?
+sc start $START_SERVICES 2>>"$LOG" || rc=$?
 for svc in $START_SERVICES; do
     systemctl is-active --quiet "$svc" || { log "WARN: $svc is not active after start"; rc=1; }
 done

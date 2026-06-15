@@ -46,6 +46,23 @@ PWM3_FLOOR=0;   PWM3_CEIL=200
 # full, so thermal safety is never sacrificed for silence. Set QUIET_FLOOR<0 to disable.
 QUIET_START=23; QUIET_END=6; QUIET_FLOOR=18
 
+# ── Spike rejection (this is what stops the fan hunting) ──────────────────────
+# The Pentium Gold boosts hard: package temp jumps ~45C -> 85C for a fraction of a
+# second on any burst (including this script's own cron wakeup) and falls straight
+# back. A single instantaneous read therefore lands on a random point of that spike,
+# which drove the fans full->idle->full every minute (the audible hunting). Two
+# filters tame it:
+#   1. Per-run MEDIAN of several CPU reads taken a beat apart — rejects the sub-second
+#      boost spikes seen within one invocation.
+#   2. An EMA (exponential moving average) carried across runs in a state file — low-
+#      passes the remaining minute-to-minute jitter. EMA_ALPHA = weight (0-100) given
+#      to the newest reading; lower = smoother/slower to react.
+CPU_SAMPLES=5; CPU_SAMPLE_GAP=0.6; EMA_ALPHA=40
+# Final guard: hard cap on how far pwm1/2 may move per cycle, so the fan can never snap
+# between idle and full in one step (e.g. on first run or when returning from a panic).
+# Up faster than down: answer real load promptly, then glide back down quietly.
+PWM_UP_STEP=70; PWM_DOWN_STEP=25
+
 DISKS="sda sdb sdc sdd sde"        # data disks to poll for temperature
 
 TMPDIR="/root/scripts/tmp"
@@ -58,6 +75,12 @@ mkdir -p "$TMPDIR"
 log(){ local m="[$(date '+%F %T')] $*"; echo "$m" >>"$LOGFILE"; [ -t 1 ] && echo "$m"; return 0; }
 trim_log(){ [ -f "$LOGFILE" ] || return; local n; n=$(wc -l <"$LOGFILE"); [ "$n" -gt 10000 ] && { tail -n 4000 "$LOGFILE" > "$LOGFILE.tmp" && mv "$LOGFILE.tmp" "$LOGFILE"; }; }
 
+# State persisted across one-shot runs (cron fires us fresh each minute, so the EMA and
+# the last applied PWM have to live on disk to survive between invocations).
+EMA_FILE="$TMPDIR/cpu.ema"; PWM_FILE="$TMPDIR/pwm.last"
+read_state(){ local v; [ -r "$1" ] && read -r v < "$1"; [[ "${v:-}" =~ ^[0-9]+$ ]] && echo "$v" || echo "$2"; }
+write_state(){ echo "$2" > "$1" 2>/dev/null || true; }
+
 # ── Sensor discovery (by name, not index) ─────────────────────────────────────
 hwmon_by_name(){ local d; for d in /sys/class/hwmon/hwmon*; do
     [ "$(cat "$d/name" 2>/dev/null)" = "$1" ] && { echo "$d"; return 0; }; done; return 1; }
@@ -65,8 +88,17 @@ hwmon_by_name(){ local d; for d in /sys/class/hwmon/hwmon*; do
 FAN_NODE="$(hwmon_by_name it8620 || true)"
 CPU_NODE="$(hwmon_by_name coretemp || hwmon_by_name k10temp || true)"
 
+# Per-run CPU temperature: take CPU_SAMPLES reads a beat apart and return their MEDIAN,
+# so a lone sub-second boost spike during this invocation can't dominate the result.
 max_cpu_temp(){ [ -n "$CPU_NODE" ] || { echo 0; return; }
-    cat "$CPU_NODE"/temp*_input 2>/dev/null | sort -nr | head -1; }
+    local i peak vals=()
+    for ((i=0; i<CPU_SAMPLES; i++)); do
+        peak=$(cat "$CPU_NODE"/temp*_input 2>/dev/null | sort -nr | head -1)
+        [ -n "$peak" ] && vals+=("$peak")
+        [ "$i" -lt $((CPU_SAMPLES-1)) ] && sleep "$CPU_SAMPLE_GAP"
+    done
+    [ ${#vals[@]} -gt 0 ] || { echo 0; return; }
+    printf '%s\n' "${vals[@]}" | sort -n | awk '{a[NR]=$0} END{print a[int((NR+1)/2)]}'; }
 
 max_disk_temp(){
     local hi=0 t d
@@ -108,7 +140,7 @@ control_once(){
     trim_log
     [ -n "$FAN_NODE" ] || { log "FATAL: it8620 fan node not found — not touching fans"; return 1; }
 
-    local cpu disk floor cpu_d disk_d d p12 p3 hour
+    local cpu disk cpu_prev cpu_ema floor cpu_d disk_d d p12 p3 p12_prev hour
     cpu=$(max_cpu_temp); disk=$(max_disk_temp)
 
     if [ "${cpu:-0}" -eq 0 ] && [ "${disk:-0}" -eq 0 ]; then
@@ -116,12 +148,19 @@ control_once(){
         restore_auto; return
     fi
 
-    if [ "${cpu:-0}" -ge "$CPU_PANIC" ] || [ "${disk:-0}" -ge "$DISK_PANIC" ]; then
-        log "PANIC cpu=${cpu%000}C disk=${disk%000}C -> BIOS auto control"
-        restore_auto; return
+    # Low-pass the (already per-run-median) CPU temp across runs with an EMA, seeded from
+    # the current read on cold start. EVERY decision below uses cpu_ema, not the raw read,
+    # so a single boost spike no longer slams the fans or trips a spurious panic.
+    cpu_prev=$(read_state "$EMA_FILE" "${cpu:-0}")
+    cpu_ema=$(( (EMA_ALPHA*${cpu:-0} + (100-EMA_ALPHA)*cpu_prev) / 100 ))
+    write_state "$EMA_FILE" "$cpu_ema"
+
+    if [ "$cpu_ema" -ge "$CPU_PANIC" ] || [ "${disk:-0}" -ge "$DISK_PANIC" ]; then
+        log "PANIC cpu=$((cpu_ema/1000))C disk=$((disk/1000))C -> BIOS auto control"
+        restore_auto; write_state "$PWM_FILE" "$PWM_CEIL"; return   # seed full so we glide DOWN on return
     fi
 
-    cpu_d=$(pct "${cpu:-0}" "$CPU_MIN" "$CPU_MAX")
+    cpu_d=$(pct "$cpu_ema" "$CPU_MIN" "$CPU_MAX")
     disk_d=$(pct "${disk:-0}" "$DISK_MIN" "$DISK_MAX")
     d=$cpu_d; [ "$disk_d" -gt "$d" ] && d=$disk_d
 
@@ -133,7 +172,18 @@ control_once(){
 
     p12=$(scale "$d" "$floor" "$PWM_CEIL")
     p3=$(scale "$d" "$PWM3_FLOOR" "$PWM3_CEIL")
-    log "cpu=${cpu%000}C(${cpu_d}%) disk=${disk%000}C(${disk_d}%) demand=${d}% -> pwm1/2=$p12 pwm3=$p3 (floor=$floor)"
+
+    # Slew-limit pwm1/2 against the last applied value: a final hard guard so the main
+    # fans can never jump idle<->full in a single cycle. pwm3 is the load-only fan that
+    # idles fully off, so it tracks demand directly.
+    p12_prev=$(read_state "$PWM_FILE" "$p12")
+    [ "$p12" -gt $((p12_prev + PWM_UP_STEP))   ] && p12=$((p12_prev + PWM_UP_STEP))
+    [ "$p12" -lt $((p12_prev - PWM_DOWN_STEP)) ] && p12=$((p12_prev - PWM_DOWN_STEP))
+    [ "$p12" -lt "$floor" ]    && p12=$floor
+    [ "$p12" -gt "$PWM_CEIL" ] && p12=$PWM_CEIL
+    write_state "$PWM_FILE" "$p12"
+
+    log "cpu=$((cpu/1000))C ema=$((cpu_ema/1000))C(${cpu_d}%) disk=$((disk/1000))C(${disk_d}%) demand=${d}% -> pwm1/2=$p12 pwm3=$p3 (floor=$floor)"
     apply_pwm "$p12" "$p3"
 }
 
