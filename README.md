@@ -1,4 +1,4 @@
-# UGREEN DXP4800 Plus lights and fans control under treNAS
+# UGREEN DXP4800 Plus lights and fans control under trueNAS
 
 This repository contains the automation scripts, hardware-specific configurations, and kernel-level overrides for a ZFS storage environment for a TrueNAS SCALE / Incus (LXC) worker machine on a UGREEN NAS.
 
