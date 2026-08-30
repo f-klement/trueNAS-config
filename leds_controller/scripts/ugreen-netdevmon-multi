@@ -46,6 +46,37 @@ get_physical_interfaces() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# Re-assert the netdev trigger (added 2026-08-30) -- same failure as the oneshot
+# one documented at length in ugreen-diskiomon. `device_name`, `link`, `tx`, `rx`
+# and `interval` are attributes of the netdev TRIGGER, not of the LED, so they
+# vanish the moment the trigger reverts to `none`, and every write below then
+# fails as EACCES ("Permission denied") rather than ENOENT, because `>` opens
+# with O_CREAT and sysfs has no ->create.
+#
+# Colour and brightness are LED attributes and survive a trigger change, so they
+# are left to the link-speed logic in the loop rather than reset here.
+# ---------------------------------------------------------------------------
+ensure_netdev_trigger() {
+    [[ -d /sys/class/leds/$led ]] || return 1
+    [[ -e /sys/class/leds/$led/device_name ]] && return 0
+
+    modprobe ledtrig-netdev 2>/dev/null || true
+    echo netdev > /sys/class/leds/$led/trigger 2>/dev/null
+    echo $NETDEV_BLINK_TX > /sys/class/leds/$led/tx 2>/dev/null
+    echo $NETDEV_BLINK_RX > /sys/class/leds/$led/rx 2>/dev/null
+    echo $NETDEV_BLINK_INTERVAL > /sys/class/leds/$led/interval 2>/dev/null
+    echo ${LED_INVERT:=1} > /sys/class/leds/$led/invert 2>/dev/null
+
+    if [[ -e /sys/class/leds/$led/device_name ]]; then
+        echo "Re-asserted netdev trigger on $led"
+        return 0
+    fi
+
+    echo "Cannot restore netdev trigger on $led; /sys/class/leds/$led/trigger is not accepting writes"
+    return 1
+}
+
 # Initialize LED
 if [[ -d /sys/class/leds/$led ]]; then
     modprobe ledtrig-netdev 2>/dev/null || true
@@ -99,8 +130,12 @@ while true; do
 
         if [ "$current_device" != "$active_iface" ]; then
             echo "Switching to interface: $active_iface (${max_speed}Mbps)"
-            echo $active_iface > /sys/class/leds/$led/device_name
-            echo 1 > /sys/class/leds/$led/link
+            # The trigger can have reverted since init; restore it before writing
+            # its attributes, or these two lines fail for the life of the daemon.
+            if ensure_netdev_trigger; then
+                echo $active_iface > /sys/class/leds/$led/device_name
+                echo 1 > /sys/class/leds/$led/link
+            fi
         fi
 
         # Update color based on link speed if enabled
@@ -146,7 +181,9 @@ while true; do
     else
         echo "No active interfaces found"
         # Clear device trigger
-        echo "" > /sys/class/leds/$led/device_name
+        if [[ -e /sys/class/leds/$led/device_name ]]; then
+            echo "" > /sys/class/leds/$led/device_name
+        fi
     fi
 
     sleep $CHECK_NETDEV_INTERVAL

@@ -151,6 +151,60 @@ do
     echo $MAPPING_METHOD ${key} ">>" ${dev_map[${key}]}
 done <<< "$(disk_enumerating_string)"
 
+# ---------------------------------------------------------------------------
+# Re-assert the oneshot trigger (added 2026-08-30)
+#
+# The `oneshot` trigger is set exactly once, in the init block below, and `shot`
+# only exists while that trigger is the ACTIVE one. If the LED class device is
+# re-registered underneath a running daemon -- led-ugreen reloading, an i2c
+# re-probe, a resume -- the trigger reverts to `none`, `shot` disappears, and
+# every write in the monitor loop fails silently for the life of the process.
+#
+# It fails as EACCES, not ENOENT: `>` opens with O_CREAT, sysfs has no ->create,
+# so the VFS returns "Permission denied". That is why the journal fills with
+# what reads like a privilege problem and is really a missing attribute. Do not
+# go looking for capabilities or lockdown when you see it; check
+# `cat /sys/class/leds/<led>/trigger` and see whether it says [none].
+#
+# Measured on truenas 25.10.3 after the 2026-08-29 host crash: disk1..disk4 were
+# re-registered at 01:47, an hour and 45 minutes after the daemon had initialised
+# against the previous devices, and it spun writing to a vanished `shot` until it
+# was restarted.
+#
+# Deliberately does NOT re-apply color or brightness. Those carry live state
+# written by the zpool and standby checkers, so restoring them here would erase a
+# disk-failure red the moment the disk next ticked.
+# ---------------------------------------------------------------------------
+TRIGGER_RECHECK_INTERVAL=${TRIGGER_RECHECK_INTERVAL:=60}
+declare -A trigger_retry_after
+
+reassert_oneshot() {
+    local led=$1
+
+    # Throttle per LED: a genuinely unwritable trigger then costs one failed write
+    # a minute, not one per LED_REFRESH_INTERVAL, which is what made the original
+    # failure mode a wall of log rather than a line.
+    if (( SECONDS < ${trigger_retry_after[$led]:-0} )); then
+        return 1
+    fi
+    trigger_retry_after[$led]=$(( SECONDS + TRIGGER_RECHECK_INTERVAL ))
+
+    [[ -d /sys/class/leds/$led ]] || return 1
+
+    echo oneshot > /sys/class/leds/$led/trigger 2>/dev/null
+    echo ${LED_INVERT:=1} > /sys/class/leds/$led/invert 2>/dev/null
+    echo 100 > /sys/class/leds/$led/delay_on 2>/dev/null
+    echo 100 > /sys/class/leds/$led/delay_off 2>/dev/null
+
+    if [[ -e /sys/class/leds/$led/shot ]]; then
+        echo "Re-asserted oneshot trigger on $led (it had reverted to $(cat /sys/class/leds/$led/trigger 2>/dev/null | grep -o '\[[a-z-]*\]'))"
+        return 0
+    fi
+
+    echo "Cannot restore oneshot trigger on $led; /sys/class/leds/$led/trigger is not accepting writes"
+    return 1
+}
+
 # initialize LEDs
 declare -A dev_to_led_map
 for i in "${!led_map[@]}"; do
@@ -351,7 +405,12 @@ else
             diskio_new_rw="$(cat /sys/block/${devices[$led]}/stat 2>/dev/null)"
 
             if [ "${diskio_data_rw[$led]}" != "${diskio_new_rw}" ]; then
-                echo 1 > /sys/class/leds/$led/shot
+                # `shot` is gone whenever the trigger is no longer `oneshot`; see
+                # reassert_oneshot above for why that happens and why the failure
+                # looks like a permissions error.
+                if [[ -e /sys/class/leds/$led/shot ]] || reassert_oneshot "$led"; then
+                    echo 1 > /sys/class/leds/$led/shot
+                fi
             fi
 
             diskio_data_rw[$led]=$diskio_new_rw
