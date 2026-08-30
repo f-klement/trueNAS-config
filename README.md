@@ -1,6 +1,6 @@
-# UGREEN DXP4800 Plus | Hybrid K3s & Storage Cluster
+# UGREEN DXP4800 Plus lights and fans control under trueNAS
 
-This repository contains the automation scripts, hardware-specific configurations, and kernel-level overrides for a hybrid Kubernetes (K3s) and ZFS storage environment for a TrueNAS SCALE / Incus (LXC) worker machine on a UGREEN NAS.
+This repository contains the automation scripts, hardware-specific configurations, and kernel-level overrides for a ZFS storage environment for a TrueNAS SCALE / Incus (LXC) worker machine on a UGREEN NAS.
 
 
 ## Hardware Integration: UGREEN DXP4800 Plus
