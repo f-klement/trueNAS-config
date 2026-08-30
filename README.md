@@ -31,8 +31,7 @@ down; unreadable disks/power states are skipped rather than parked; output goes 
 file only (no cron email spam).
 
 > Fan control is **not** done here — `fan_control.sh` owns the fans and reacts to CPU+disk
-> temps every minute, independent of spin-down. (The old combined version also called
-> undefined `apply_blackout_fans`/`set_fans_silent` functions.)
+> temps every minute, independent of spin-down.
 
 ### fan_control.sh
 Proportional fan control reacting to the hottest of CPU (`coretemp`/`k10temp`) and disk
