@@ -40,6 +40,21 @@ Proportional fan control reacting to the hottest of CPU (`coretemp`/`k10temp`) a
 that hands control back to the BIOS, and a fail-safe to BIOS auto if no sensor is readable.
 Run every minute from cron (`fan_control.sh`) or as a fast loop daemon (`fan_control.sh 20`).
 
+**Loads its own driver.** If no `it8620` hwmon node is present it runs
+`modprobe it87 force_id=0x8620 ignore_resource_conflict=1` and re-checks, every run, so the
+setup self-heals across a reboot instead of depending on the Post-Init script below still
+being there. The check is a single hwmon scan on the normal path, and a failed load falls
+through to the same fail-safe as before rather than retrying in a loop. It still needs
+`acpi_enforce_resources=lax` on the kernel command line, which the script cannot set.
+
+**Its exit status is a contract**, because `fan_control.sh` is a one-shot cron job and that
+status is the only thing it leaves behind. Non-zero means *the fans were not driven* — no
+`it8620` node, the module would not load, no readable sensor, or a PWM write that failed.
+Zero means they were, including the over-temperature hand-off to the BIOS, which is the
+fail-safe working rather than a malfunction. This is relied on: Wazuh rule **100928** in the
+`k3s` repo pages when a TrueNAS `CronTask` exits non-zero. `tests/test-fan-node-ensure.sh`
+covers both halves.
+
 ### lights_on.sh / lights_out.sh
 Handles the atomic switching of the LED daemon profiles.
 
@@ -51,8 +66,17 @@ Gracefully restarts the UGREEN monitoring daemons to apply the new state.
 ## Persistence on TrueNAS SCALE
 TrueNAS SCALE utilizes a volatile root filesystem. To ensure these configurations survive updates and reboots, the following Post-Init script must be configured in the Web UI:
 
+> **The `it87` line is now belt-and-braces, not the only mechanism.** `fan_control.sh` loads
+> the module itself when the `it8620` node is missing, because relying on this Post-Init entry
+> alone failed badly: on **2026-09-01** it was found not to have run, and the script had
+> therefore bailed at its first guard on *every* run, once a minute, for at least **2,712
+> consecutive runs** — the fans were on BIOS defaults for days. Nothing noticed, because the
+> only trace a one-shot cron script leaves is its exit status and nothing was reading it.
+> Either mechanism is now sufficient on its own. The kernel flag below is still required and
+> is **not** something the script can set for itself.
+
 ```Bash
-# Load hardware drivers
+# Load hardware drivers (also done by fan_control.sh itself; harmless to do twice)
 modprobe it87 force_id=0x8620 ignore_resource_conflict=1
 
 # Re-establish volatile symlinks

@@ -85,7 +85,52 @@ write_state(){ echo "$2" > "$1" 2>/dev/null || true; }
 hwmon_by_name(){ local d; for d in /sys/class/hwmon/hwmon*; do
     [ "$(cat "$d/name" 2>/dev/null)" = "$1" ] && { echo "$d"; return 0; }; done; return 1; }
 
-FAN_NODE="$(hwmon_by_name it8620 || true)"
+# ── Make sure the fan controller is actually there ────────────────────────────
+# The it8620 is a super-IO chip behind an ACPI-claimed resource region, so it only appears
+# as an hwmon node once the it87 driver has been told to take it: the chip is not in the
+# driver's ID table (hence force_id) and ACPI holds the ports (hence the lax boot flag,
+# set on the kernel command line, plus ignore_resource_conflict for the driver itself).
+#
+# That modprobe used to live ONLY in the TrueNAS Post-Init script (see README), and on
+# 2026-09-01 it was found not to have run: no it87 in /proc/modules, no it8620 in
+# /sys/class/hwmon, so FAN_NODE below was empty and control_once bailed at its first
+# guard. It had done so on EVERY run, once a minute, for at least the 2,712 runs that
+# could still be accounted for — the fans were on BIOS defaults for days on the box that
+# holds every dataset here, and the only trace was this script's exit status, which
+# nothing read.
+#
+# So the script now establishes its own precondition rather than assuming someone else
+# did. It runs as root from cron every minute, which is exactly what is needed to load a
+# module, and a script that can guarantee the thing it depends on should not instead fail
+# because a separate, invisible, easily-lost UI setting did not. The Post-Init entry stays
+# in the README as the belt to this braces; either alone is now sufficient.
+#
+# Cheap and idempotent: the modprobe is attempted ONLY when the node is missing, so the
+# normal path is one hwmon_by_name scan and no module work at all. When the module genuinely
+# cannot be loaded (not built for this kernel, say) this costs one failed modprobe per
+# minute and then falls through to the same fail-safe as before — it does not spin, retry
+# in a loop, or mask the failure.
+ensure_fan_node(){
+    FAN_NODE="$(hwmon_by_name it8620 || true)"
+    [ -n "$FAN_NODE" ] && return 0
+
+    command -v modprobe >/dev/null 2>&1 || { log "it8620 absent and modprobe unavailable"; return 1; }
+    log "it8620 hwmon node absent — loading it87 (force_id=0x8620)"
+    if ! modprobe it87 force_id=0x8620 ignore_resource_conflict=1 2>/dev/null; then
+        log "modprobe it87 FAILED — is the module built for $(uname -r), and is acpi_enforce_resources=lax on the kernel command line?"
+        return 1
+    fi
+
+    FAN_NODE="$(hwmon_by_name it8620 || true)"
+    if [ -n "$FAN_NODE" ]; then
+        log "it87 loaded, fan node is now $FAN_NODE"
+        return 0
+    fi
+    log "it87 loaded but no it8620 hwmon node appeared — chip may be claimed by ACPI"
+    return 1
+}
+
+FAN_NODE=""
 CPU_NODE="$(hwmon_by_name coretemp || hwmon_by_name k10temp || true)"
 
 # Per-run CPU temperature: take CPU_SAMPLES reads a beat apart and return their MEDIAN,
@@ -130,22 +175,43 @@ pct(){ local t=$1 lo=$2 hi=$3
 # scale(pct,floor,ceil) -> pwm
 scale(){ echo $(( $2 + ($3-$2)*$1/100 )); }
 
-apply_pwm(){ local p12=$1 p3=$2 ch
-    for ch in 1 2; do echo 1 >"$FAN_NODE/pwm${ch}_enable" 2>/dev/null; echo "$p12" >"$FAN_NODE/pwm${ch}" 2>/dev/null; done
-    echo 1 >"$FAN_NODE/pwm3_enable" 2>/dev/null; echo "$p3" >"$FAN_NODE/pwm3" 2>/dev/null; }
+# Returns non-zero if any PWM write failed. This USED to return whatever its last
+# redirection happened to evaluate to, which then became control_once's status and so the
+# script's exit status — meaning a perfectly good run could exit non-zero on an unrelated
+# pwm3 hiccup, and a failed run could exit 0. That status is now alerted on (Wazuh rule
+# 100928 in the k3s repo pages when a NAS CronTask exits non-zero), so it has to mean
+# exactly one thing: the fans were driven, or they were not.
+apply_pwm(){ local p12=$1 p3=$2 ch rc=0
+    for ch in 1 2; do
+        echo 1     >"$FAN_NODE/pwm${ch}_enable" 2>/dev/null || rc=1
+        echo "$p12" >"$FAN_NODE/pwm${ch}"        2>/dev/null || rc=1
+    done
+    echo 1    >"$FAN_NODE/pwm3_enable" 2>/dev/null || rc=1
+    echo "$p3" >"$FAN_NODE/pwm3"        2>/dev/null || rc=1
+    [ "$rc" -eq 0 ] || log "WARN: one or more PWM writes failed under $FAN_NODE"
+    return "$rc"; }
 
-restore_auto(){ local ch; for ch in 1 2 3; do echo 2 >"$FAN_NODE/pwm${ch}_enable" 2>/dev/null; done; }
+# Always 0: handing the fans back to the BIOS is a deliberate, correct outcome on both of
+# its call paths (panic, and no readable sensor), never a failure in itself. Explicit so it
+# cannot leak the status of its last redirection into control_once's.
+restore_auto(){ local ch; for ch in 1 2 3; do echo 2 >"$FAN_NODE/pwm${ch}_enable" 2>/dev/null; done; return 0; }
 
 control_once(){
     trim_log
-    [ -n "$FAN_NODE" ] || { log "FATAL: it8620 fan node not found — not touching fans"; return 1; }
+    # Re-checked EVERY run, not once at startup: in daemon mode the old top-level assignment
+    # meant a node that appeared later was never picked up, and one that vanished was never
+    # reported again. This also makes the module load self-healing across a reboot.
+    ensure_fan_node || { log "FATAL: it8620 fan node not available — not touching fans"; return 1; }
 
     local cpu disk cpu_prev cpu_ema floor cpu_d disk_d d p12 p3 p12_prev hour
     cpu=$(max_cpu_temp); disk=$(max_disk_temp)
 
     if [ "${cpu:-0}" -eq 0 ] && [ "${disk:-0}" -eq 0 ]; then
         log "WARN: no temperature readable (cpu+disk=0) — handing fans to BIOS auto"
-        restore_auto; return
+        # Non-zero deliberately. The BIOS taking over is safe, but this script is not doing
+        # its job, and failing safe is not the same as working — with the exit status now
+        # alerted on, that distinction is the whole point.
+        restore_auto; return 1
     fi
 
     # Low-pass the (already per-run-median) CPU temp across runs with an EMA, seeded from
@@ -157,7 +223,10 @@ control_once(){
 
     if [ "$cpu_ema" -ge "$CPU_PANIC" ] || [ "${disk:-0}" -ge "$DISK_PANIC" ]; then
         log "PANIC cpu=$((cpu_ema/1000))C disk=$((disk/1000))C -> BIOS auto control"
-        restore_auto; write_state "$PWM_FILE" "$PWM_CEIL"; return   # seed full so we glide DOWN on return
+        # Zero: an over-temperature hand-off to the BIOS is this script's fail-safe
+        # operating correctly, not a malfunction of it. The log line and the fans being
+        # audible are the signal here; the cron status is not the right channel for it.
+        restore_auto; write_state "$PWM_FILE" "$PWM_CEIL"; return 0   # seed full so we glide DOWN on return
     fi
 
     cpu_d=$(pct "$cpu_ema" "$CPU_MIN" "$CPU_MAX")
